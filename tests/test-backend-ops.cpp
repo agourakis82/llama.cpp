@@ -5707,6 +5707,45 @@ struct test_mul_mat_id : public test_case {
     }
 };
 
+struct test_mul_mat_id_f32 : public test_mul_mat_id {
+    const float amax = 1e5f;
+    const bool fusion;
+
+    test_mul_mat_id_f32(ggml_type type_a, bool broadcast, int64_t m = 2304, int64_t n = 1,
+                       int64_t k = 896, int64_t m_v = 2336, bool fusion = false)
+        : test_mul_mat_id(type_a, GGML_TYPE_F32, 64, 8, broadcast, m, n, k, m_v), fusion(fusion) {}
+
+    std::string vars() override {
+        return test_mul_mat_id::vars() + "," + VARS_TO_STR2(amax, fusion);
+    }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * out = test_mul_mat_id::build_graph(ctx);
+        GGML_ASSERT(ggml_prec_set_src(out, GGML_PREC_F32, 1));
+        if (fusion) {
+            ggml_tensor * gate = ggml_mul_mat_id(ctx, out->src[0], out->src[1], out->src[2]);
+            GGML_ASSERT(ggml_prec_set_src(gate, GGML_PREC_F32, 1));
+            out = ggml_swiglu_split(ctx, gate, out);
+        }
+        return out;
+    }
+
+    bool run_whole_graph() override { return fusion; }
+
+    std::string op_desc(ggml_tensor * t) override {
+        return fusion ? "MUL_MAT_ID_FUSION" : test_mul_mat_id::op_desc(t);
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        test_mul_mat_id::initialize_tensors(ctx);
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
+            if (strcmp(t->name, "b") == 0) {
+                init_tensor_uniform(t, -amax, amax);
+            }
+        }
+    }
+};
+
 // MUL_MAT_ID with expert ids repeated within a token's row
 struct test_mul_mat_id_dup : public test_mul_mat_id {
     using test_mul_mat_id::test_mul_mat_id;
@@ -11292,6 +11331,15 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
                 test_cases.emplace_back(new test_mul_mat(type_a, type_b, 16, 1, ggml_blck_size(type_a), {1,  1}, {1, 1}));
             }
             test_cases.emplace_back(new test_mul_mat(type_a, type_b, 16, 1, 256, {1,  1}, {1, 1}));
+        }
+    }
+
+    for (ggml_type type_a : { GGML_TYPE_Q8_0, GGML_TYPE_Q5_0 }) {
+        for (bool broadcast : { false, true }) {
+            test_cases.emplace_back(new test_mul_mat_id_f32(type_a, broadcast));
+            test_cases.emplace_back(new test_mul_mat_id_f32(type_a, broadcast, 32, 1, 256, 0));
+            test_cases.emplace_back(new test_mul_mat_id_f32(type_a, broadcast, 32, 2, 256, 0));
+            test_cases.emplace_back(new test_mul_mat_id_f32(type_a, broadcast, 32, 1, 256, 0, true));
         }
     }
 

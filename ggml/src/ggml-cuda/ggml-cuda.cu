@@ -33,6 +33,9 @@
 #include "ggml-cuda/mmq.cuh"
 #include "ggml-cuda/mmvf.cuh"
 #include "ggml-cuda/mmvq.cuh"
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+#include "ggml-cuda/mmid-f32.cuh"
+#endif
 #include "ggml-cuda/moe-weighted-reduction.cuh"
 #include "ggml-cuda/norm.cuh"
 #include "ggml-cuda/opt-step-adamw.cuh"
@@ -1780,6 +1783,11 @@ static bool ggml_cuda_should_fuse_mul_mat(const ggml_tensor * ffn_up,
     const bool has_bias = ffn_up_bias != nullptr || ffn_gate_bias != nullptr;
     const bool has_scale = ffn_up_scale != nullptr || ffn_gate_scale != nullptr;
 
+    if ((ffn_up->op == GGML_OP_MUL_MAT_ID && ggml_prec_get_src(ffn_up, 1) == GGML_PREC_F32) ||
+        (ffn_gate->op == GGML_OP_MUL_MAT_ID && ggml_prec_get_src(ffn_gate, 1) == GGML_PREC_F32)) {
+        return false;
+    }
+
     if (has_bias && (!ffn_up_bias || !ffn_gate_bias)) {
         return false;
     }
@@ -1893,6 +1901,10 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_f(const ggml_tensor * tensor) {
 }
 
 static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
+    if (tensor->op == GGML_OP_MUL_MAT_ID && ggml_prec_get_src(tensor, 1) == GGML_PREC_F32) {
+        return false;
+    }
+
     ggml_tensor *       src0 = tensor->src[0];
     ggml_tensor *       src1 = tensor->src[1];
     const ggml_tensor * dst  = tensor;
@@ -2089,6 +2101,15 @@ static bool ggml_cuda_mul_mat_id_needs_sync(const ggml_tensor * dst, const int c
     const ggml_tensor * src0 = dst->src[0];
     const ggml_tensor * src1 = dst->src[1];
 
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+    if (ggml_cuda_mul_mat_id_f32_supported(dst, cc)) {
+        return false;
+    }
+#endif
+    if (ggml_prec_get_src(dst, 1) == GGML_PREC_F32) {
+        return true;
+    }
+
     const int warp_size = ggml_cuda_info().devices[ggml_cuda_get_device()].warp_size;
 
     if (src1->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
@@ -2131,6 +2152,12 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
 
     // [TAG_MUL_MAT_ID_CUDA_GRAPHS]
     if (src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+        if (ggml_cuda_mul_mat_id_f32_supported(dst, cc)) {
+            ggml_cuda_mul_mat_id_f32(ctx, dst);
+            return;
+        }
+#endif
         static_assert(MMVQ_MAX_BATCH_SIZE == MMVF_MAX_BATCH_SIZE);
         if (ne2 <= MMVQ_MAX_BATCH_SIZE) {
             if (ggml_is_quantized(src0->type)) {
@@ -5735,7 +5762,12 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     return false;
                 }
                 if (op->op == GGML_OP_MUL_MAT_ID && ggml_get_op_params_i32(op, 3) == GGML_PREC_F32) {
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+                    const int cc = ggml_cuda_info().devices[dev_ctx->device].cc;
+                    return ggml_cuda_mul_mat_id_f32_supported(op, cc);
+#else
                     return false;
+#endif
                 }
 #ifdef GGML_USE_MUSA
                 const int cc = ggml_cuda_info().devices[dev_ctx->device].cc;
